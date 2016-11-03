@@ -9,11 +9,29 @@ import scala.util.Try
 trait IOMonad {
   monad =>
 
-  def sequence[A, M[X] <: TraversableOnce[X], E <: Effect](in: M[IO[A, E]])(implicit cbf: CanBuildFrom[M[IO[A, E]], A, M[A]]): IO[M[A], E]
-  def zip[T, E1 <: Effect, S, E2 <: Effect](a: IO[T, E1], b: IO[S, E2]): IO[(T, S), E1 with E2]
-  def transform[T, S, E <: Effect](io: IO[T, E])(f: Try[T] => Try[S]): IO[S, E]
-  def transformWith[T, S, E1 <: Effect, E2 <: Effect](io: IO[T, E1])(f: Try[T] => IO[S, E2]): IO[S, E1 with E2]
-  def unit: IO[Unit, Effect]
+  type Result[T]
+
+  def run[T, E <: Effect](io: IO[T, E]): Result[T]
+
+  case object Unit extends IO[Unit, Effect]
+  def unit: IO[Unit, Effect] = Unit
+
+  case class Sequence[A, M[X] <: TraversableOnce[X], E <: Effect](in: M[IO[A, E]])(implicit cbf: CanBuildFrom[M[IO[A, E]], A, M[A]]) extends IO[M[A], E]
+  def sequence[A, M[X] <: TraversableOnce[X], E <: Effect](in: M[IO[A, E]])(implicit cbf: CanBuildFrom[M[IO[A, E]], A, M[A]]): IO[M[A], E] = Sequence(in)
+
+  case class TransformWith[T, S, E1 <: Effect, E2 <: Effect](io: IO[T, E1])(f: Try[T] => IO[S, E2]) extends IO[S, E1 with E2]
+  def transformWith[T, S, E1 <: Effect, E2 <: Effect](io: IO[T, E1])(f: Try[T] => IO[S, E2]): IO[S, E1 with E2] = TransformWith(io)(f)
+
+  def transform[T, S, E <: Effect](io: IO[T, E])(f: Try[T] => Try[S]): IO[S, E] =
+    transformWith(io) { r =>
+      successful(f(r)).lowerFromTry
+    }
+
+  def zip[T, E1 <: Effect, S, E2 <: Effect](a: IO[T, E1], b: IO[S, E2]): IO[(T, S), E1 with E2] =
+    sequence(List(a, b)).map {
+      case a :: b :: Nil => (a.asInstanceOf[T], b.asInstanceOf[S])
+      case other => throw new IllegalStateException("Sequence returned less than two elements")
+    }
 
   def failed[T](exception: Throwable): IO[T, Effect] = apply(throw exception)
 
@@ -35,13 +53,20 @@ trait IOMonad {
   def traverse[A, B, M[X] <: TraversableOnce[X], E <: Effect](in: M[A])(fn: A => IO[B, E])(implicit cbf: CanBuildFrom[M[A], B, M[B]]): IO[M[B], E] =
     sequence(in.map(fn)).map(r => cbf().++=(r).result)
 
-  object Unit extends IO[Unit, Effect]
-
   sealed trait IO[+T, -E <: Effect] {
 
     def zip[S, E2 <: Effect](that: IO[S, E2]): IO[(T, S), E with E2] = monad.zip(this, that)
     def transform[S](f: Try[T] => Try[S]): IO[S, E] = monad.transform(this)(f)
     def transformWith[S, E2 <: Effect](f: Try[T] => IO[S, E2]): IO[S, E with E2] = monad.transformWith(this)(f)
+
+    def lowerFromTry[U](implicit ev: T => Try[U]) =
+      map(ev).flatMap {
+        case Success(v) => monad.successful(v)
+        case Failure(e) => monad.failed(e)
+      }
+
+    def liftToTry: IO[Try[T], E] =
+      transformWith(monad.successful)
 
     def failed: IO[Throwable, E] =
       transform {
@@ -96,5 +121,3 @@ trait IOMonad {
       }
   }
 }
-
-
