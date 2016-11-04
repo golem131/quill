@@ -10,15 +10,19 @@ import io.getquill.context.mirror.Row
 
 import io.getquill.idiom.{ Idiom => BaseIdiom }
 import scala.util.Try
+import io.getquill.monad.IOMonad
+import scala.annotation.tailrec
 
 class MirrorContextWithQueryProbing[Idiom <: BaseIdiom, Naming <: NamingStrategy]
   extends MirrorContext[Idiom, Naming] with QueryProbing
 
 class MirrorContext[Idiom <: BaseIdiom, Naming <: NamingStrategy]
-  extends Context[Idiom, Naming]
-  with MirrorEncoders
-  with MirrorDecoders {
+    extends Context[Idiom, Naming]
+    with MirrorEncoders
+    with MirrorDecoders
+    with IOMonad {
 
+  override type Result[T] = T
   override type RunQueryResult[T] = QueryMirror[T]
   override type RunQuerySingleResult[T] = QueryMirror[T]
   override type RunActionResult = ActionMirror
@@ -27,6 +31,21 @@ class MirrorContext[Idiom <: BaseIdiom, Naming <: NamingStrategy]
   override type RunBatchActionReturningResult[T] = BatchActionReturningMirror[T]
 
   override def close = ()
+
+  override def unsafePerformIO[T](io: IO[T, _]): Result[T] =
+    io match {
+      case Unit => ()
+      case Run(f) => f()
+      case Sequence(in, cbf) =>
+        val builder = cbf()
+        in.foreach {  =>
+          builder += unsafePerformIO(io)
+        }
+        cbf(r).result()
+      case TransformWith(io, f) =>
+        val r = Try(unsafePerformIO(io))
+        unsafePerformIO(f(r))
+    }
 
   def probe(statement: String): Try[_] =
     if (statement.contains("Fail"))
@@ -67,6 +86,5 @@ class MirrorContext[Idiom <: BaseIdiom, Naming <: NamingStrategy]
       groups.map {
         case BatchGroupReturning(string, column, prepare) =>
           (string, column, prepare.map(_(Row())))
-      }, extractor
-    )
+      }, extractor)
 }
