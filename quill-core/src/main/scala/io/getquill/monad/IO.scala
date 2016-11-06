@@ -8,15 +8,18 @@ import scala.util.Success
 import scala.util.Try
 import io.getquill.context.Context
 
+sealed trait Effect
+
+object Effect {
+  sealed trait Read extends Effect
+  sealed trait Write extends Effect
+}
+
 trait IOMonad {
   this: Context[_, _] =>
 
-  sealed trait Effect
-
-  object Effect {
-    sealed trait Read extends Effect
-    sealed trait Write extends Effect
-  }
+  type Effect = io.getquill.monad.Effect
+  val Effect = io.getquill.monad.Effect
 
   def runIO[T](quoted: Quoted[T]): IO[RunQuerySingleResult[T], Effect.Read] = macro IOMonadMacro.runIO
   def runIO[T](quoted: Quoted[Query[T]]): IO[RunQueryResult[T], Effect.Read] = macro IOMonadMacro.runIO
@@ -101,10 +104,11 @@ trait IOMonad {
 
     def map[S](f: T => S): IO[S, E] = transform(_.map(f))
 
-    def flatMap[S, E2 <: Effect](f: T => IO[S, E2]): IO[S, E with E2] = transformWith {
-      case Success(s) => f(s)
-      case Failure(_) => this.asInstanceOf[IO[S, E with E2]]
-    }
+    def flatMap[S, E2 <: Effect](f: T => IO[S, E2]): IO[S, E with E2] =
+      transformWith {
+        case Success(s) => f(s)
+        case Failure(_) => this.asInstanceOf[IO[S, E with E2]]
+      }
 
     def filter(p: T => Boolean): IO[T, E] =
       map { r => if (p(r)) r else throw new NoSuchElementException("IO.filter predicate is not satisfied") }
