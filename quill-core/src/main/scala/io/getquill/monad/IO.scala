@@ -7,12 +7,66 @@ import scala.util.Failure
 import scala.util.Success
 import scala.util.Try
 import io.getquill.context.Context
+import scala.annotation.tailrec
+import scala.concurrent.Future
+import scala.concurrent.ExecutionContext
 
 sealed trait Effect
 
 object Effect {
   sealed trait Read extends Effect
   sealed trait Write extends Effect
+}
+
+trait SyncIOMonad extends IOMonad {
+  this: Context[_, _] =>
+
+  type Result[T] = T
+
+  def unsafePerformIO[T](io: IO[T, _]): Result[T] = {
+    @tailrec def loop[U](io: IO[U, _]): Result[U] = {
+      def flatten[Y, M[X] <: TraversableOnce[X]](seq: Sequence[Y, M, Effect]) =
+        seq.in.foldLeft(IO.successful(seq.cbf())) {
+          (builder, item) =>
+            builder.flatMap(b => item.map(b += _))
+        }.map(_.result())
+      io match {
+        case Unit => ()
+        case Run(f) => f()
+        case seq @ Sequence(_, _) =>
+          loop(flatten(seq))
+        case TransformWith(a, fA) =>
+          io match {
+            case Unit => loop(fA(Success(())))
+            case Run(r) => loop(fA(Try(r())))
+            case seq @ Sequence(_, _) =>
+              loop(flatten(seq).transformWith(fA))
+            case TransformWith(b, fB) =>
+              loop(b.transformWith(fB(_).transformWith(fA)))
+          }
+      }
+    }
+    loop(io)
+  }
+}
+
+trait ScalaFutureIOMonad extends IOMonad {
+  this: Context[_, _] =>
+
+  type Result[T] = Future[T]
+
+  def unsafePerformIO[T](io: IO[T, _])(implicit ec: ExecutionContext): Result[T] =
+    io match {
+      case Unit => Future.successful(())
+      case Run(f) => f()
+      case Sequence(in, cbf) =>
+        Future.sequence(in.map(unsafePerformIO))(cbf, ec)
+      case TransformWith(a, fA) =>
+        unsafePerformIO(a)
+          .map(Success(_))
+          .recover { case ex => Failure(ex) }
+          .flatMap(v => unsafePerformIO(fA(v)))
+    }
 }
 
 trait IOMonad {
@@ -32,8 +86,6 @@ trait IOMonad {
   protected case class Run[T, E <: Effect](f: () => Result[T]) extends IO[T, E]
   protected case class Sequence[A, M[X] <: TraversableOnce[X], E <: Effect](in: M[IO[A, E]], cbf: CanBuildFrom[M[A], A, M[A]]) extends IO[M[A], E]
   protected case class TransformWith[T, S, E1 <: Effect, E2 <: Effect](io: IO[T, E1], f: Try[T] => IO[S, E2]) extends IO[S, E1 with E2]
-
-  def unsafePerformIO[T](io: IO[T, _]): Result[T]
 
   object IO {
 

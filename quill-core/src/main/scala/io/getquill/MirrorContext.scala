@@ -10,9 +10,7 @@ import io.getquill.context.mirror.Row
 
 import io.getquill.idiom.{ Idiom => BaseIdiom }
 import scala.util.Try
-import io.getquill.monad.IOMonad
-import scala.annotation.tailrec
-import scala.collection.mutable.Builder
+import io.getquill.monad.SyncIOMonad
 
 class MirrorContextWithQueryProbing[Idiom <: BaseIdiom, Naming <: NamingStrategy]
   extends MirrorContext[Idiom, Naming] with QueryProbing
@@ -21,7 +19,7 @@ class MirrorContext[Idiom <: BaseIdiom, Naming <: NamingStrategy]
     extends Context[Idiom, Naming]
     with MirrorEncoders
     with MirrorDecoders
-    with IOMonad {
+    with SyncIOMonad {
 
   override type Result[T] = T
   override type RunQueryResult[T] = QueryMirror[T]
@@ -32,32 +30,6 @@ class MirrorContext[Idiom <: BaseIdiom, Naming <: NamingStrategy]
   override type RunBatchActionReturningResult[T] = BatchActionReturningMirror[T]
 
   override def close = ()
-
-  override def unsafePerformIO[T](io: IO[T, _]): Result[T] = {
-    @tailrec def loop[U](io: IO[U, _]): Result[U] = {
-      def flatten[Y, M[X] <: TraversableOnce[X]](seq: Sequence[Y, M, Effect]) =
-        seq.in.foldLeft(IO.successful(seq.cbf())) {
-          (builder, item) =>
-            builder.flatMap(b => item.map(b += _))
-        }.map(_.result())
-      io match {
-        case Unit => ()
-        case Run(f) => f()
-        case seq @ Sequence(_, _) =>
-          loop(flatten(seq))
-        case TransformWith(a, fA) =>
-          io match {
-            case Unit => loop(fA(Success(())))
-            case Run(r) => loop(fA(Try(r())))
-            case seq @ Sequence(_, _) =>
-              loop(flatten(seq).transformWith(fA))
-            case TransformWith(b, fB) =>
-              loop(b.transformWith(fB(_).transformWith(fA)))
-          }
-      }
-    }
-    loop(io)
-  }
 
   def probe(statement: String): Try[_] =
     if (statement.contains("Fail"))
